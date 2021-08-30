@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	config "github.com/ipfs/go-ipfs-config"
@@ -26,7 +25,13 @@ import (
 
 /// ------ Setting up the IPFS Repo
 
-func setupPlugins() error {
+func setupPlugins(externalPluginsPath string) error {
+	// Load any external plugins if available on externalPluginsPath
+	plugins, err := loader.NewPluginLoader(filepath.Join(externalPluginsPath, "plugins"))
+	if err != nil {
+		return fmt.Errorf("error loading plugins: %s", err)
+	}
+
 	// Load preloaded and external plugins
 	if err := plugins.Initialize(); err != nil {
 		return fmt.Errorf("error initializing plugins: %s", err)
@@ -75,6 +80,7 @@ func createNode(ctx context.Context, repoPath string) (icore.CoreAPI, error) {
 	nodeOptions := &core.BuildCfg{
 		Online:  true,
 		Routing: libp2p.DHTOption, // This option sets the node to be a full DHT node (both fetching and storing DHT Records)
+		// Routing: libp2p.DHTClientOption, // This option sets the node to be a client DHT node (only fetching records)
 		Repo: repo,
 	}
 
@@ -87,9 +93,25 @@ func createNode(ctx context.Context, repoPath string) (icore.CoreAPI, error) {
 	return coreapi.NewCoreAPI(node)
 }
 
+// Spawns a node on the default repo location, if the repo exists
+func spawnDefault(ctx context.Context) (icore.CoreAPI, error) {
+	defaultPath, err := config.PathRoot()
+	if err != nil {
+		// shouldn't be possible
+		return nil, err
+	}
+
+	if err := setupPlugins(defaultPath); err != nil {
+		return nil, err
+
+	}
+
+	return createNode(ctx, defaultPath)
+}
+
 // Spawns a node to be used just for this run (i.e. creates a tmp repo)
 func spawnEphemeral(ctx context.Context) (icore.CoreAPI, error) {
-	if err := setupPlugins(); err != nil {
+	if err := setupPlugins(""); err != nil {
 		return nil, err
 	}
 
@@ -139,16 +161,67 @@ func connectToPeers(ctx context.Context, ipfs icore.CoreAPI, peers []string) err
 	return nil
 }
 
+func getUnixfsFile(path string) (files.File, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	st, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	f, err := files.NewReaderPathFile(path, file, st)
+	if err != nil {
+		return nil, err
+	}
+
+	return f, nil
+}
+
+func getUnixfsNode(path string) (files.Node, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+
+	f, err := files.NewSerialFile(path, false, st)
+	if err != nil {
+		return nil, err
+	}
+
+	return f, nil
+}
+
+/// -------
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	/*
+		// Spawn a node using the default path (~/.ipfs), assuming that a repo exists there already
+		fmt.Println("Spawning node on default repo")
+		ipfs, err := spawnDefault(ctx)
+		if err != nil {
+			panic(fmt.Errorf("failed to spawnDefault node: %s", err))
+		}
+	*/
+
+	// Spawn a node using a temporary path, creating a temporary repo for the run
 	fmt.Println("Spawning node on a temporary repo")
 	ipfs, err := spawnEphemeral(ctx)
 	if err != nil {
 		panic(fmt.Errorf("failed to spawn ephemeral node: %s", err))
 	}
+
+	fmt.Println("IPFS node is running")
+
+	/// --- Part IV: Getting a file from the IPFS Network
+
+	fmt.Println("\n-- Going to connect to a few nodes in the Network as bootstrappers --")
 
 	bootstrapNodes := []string{
 		// IPFS Bootstrapper nodes.
@@ -166,6 +239,10 @@ func main() {
 		"/ip4/138.201.68.74/udp/4001/quic/p2p/QmdnXwLrC8p1ueiq2Qya8joNvk3TVVDAut7PrikmZwubtR",
 		"/ip4/94.130.135.167/tcp/4001/p2p/QmUEMvxS2e7iDrereVYc5SWPauXPyNwxcy9BXZrC1QTcHE",
 		"/ip4/94.130.135.167/udp/4001/quic/p2p/QmUEMvxS2e7iDrereVYc5SWPauXPyNwxcy9BXZrC1QTcHE",
+
+		// You can add more nodes here, for example, another IPFS node you might have running locally, mine was:
+		// "/ip4/127.0.0.1/tcp/4010/p2p/QmZp2fhDLxjYue2RiUvLwT9MWdnbDxam32qYFnGmxZDh5L",
+		// "/ip4/127.0.0.1/udp/4010/quic/p2p/QmZp2fhDLxjYue2RiUvLwT9MWdnbDxam32qYFnGmxZDh5L",
 	}
 
 	go func() {
@@ -178,7 +255,7 @@ func main() {
 	exampleCIDStr := "QmUaoioqU7bxezBQZkUcgcSyokatMY71sxsALxQmRRrHrj"
 
 	fmt.Printf("Fetching a file from the network with CID %s\n", exampleCIDStr)
-	outputPath := outputBasePath + exampleCIDStr
+	outputPath := "./" + exampleCIDStr
 	testCID := icorepath.New(exampleCIDStr)
 
 	rootNode, err := ipfs.Unixfs().Get(ctx, testCID)
